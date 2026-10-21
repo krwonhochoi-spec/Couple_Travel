@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>드라이브 코스 플래너</title>
+
+  <!-- 네이버 지도 API (NCP 클라이언트 ID를 YOUR_NCP_CLIENT_ID 위치에 입력) -->
+  <script type="text/javascript" src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=YOUR_NCP_CLIENT_ID"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", Roboto, sans-serif;
+      background-color: #f7f9fa;
+    }
+
+    #app-container {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 상단 정보 패널 */
+    #dashboard {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      right: 14px;
+      z-index: 100;
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(10px);
+      border-radius: 14px;
+      padding: 14px 18px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s;
+    }
+    .trip-title { font-size: 16px; font-weight: 700; color: #191919; }
+    .trip-stats {
+      font-size: 13px;
+      color: #03C75A;
+      font-weight: 600;
+      margin-top: 4px;
+      display: flex;
+      gap: 12px;
+    }
+    .trip-stats span { color: #555; font-weight: 400; }
+
+    /* 지도 영역 */
+    #map {
+      width: 100%;
+      height: 100%;
+      background: #eef0f2; /* 타일 수신 전 백지 방지 배경 */
+    }
+
+    /* 플로팅 컨트롤 UI */
+    .controls-wrapper {
+      position: absolute;
+      bottom: 24px;
+      right: 14px;
+      left: 14px;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      pointer-events: none;
+    }
+    .btn-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: auto;
+      margin-left: auto;
+    }
+
+    .action-btn {
+      background: #ffffff;
+      color: #222;
+      border: none;
+      border-radius: 30px;
+      padding: 12px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .action-btn.primary {
+      background: #03C75A;
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(3, 199, 90, 0.4);
+    }
+    .action-btn:active { transform: scale(0.96); }
+
+    /* 커스텀 마커 스타일 */
+    .marker-pin {
+      padding: 6px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #fff;
+      background: #03C75A;
+      border: 2px solid #fff;
+      box-shadow: 0 3px 8px rgba(0,0,0,0.25);
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .marker-pin.food { background: #FF5722; }
+    .marker-pin.end { background: #1E88E5; }
+
+    /* 전체화면 모드 스타일 */
+    body.is-fullscreen #dashboard {
+      transform: translateY(-120%);
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="app-container">
+  <!-- 상단 요약 정보창 -->
+  <div id="dashboard">
+    <div class="trip-title" id="course-name">주요 드라이브 & 맛집 투어</div>
+    <div class="trip-stats">
+      <span id="route-dist">계산 중...</span>
+      <span id="route-time"></span>
+    </div>
+  </div>
+
+  <!-- 지도 캔버스 -->
+  <div id="map"></div>
+
+  <!-- 하단 조작 컨트롤 -->
+  <div class="controls-wrapper">
+    <div class="btn-group">
+      <button class="action-btn" id="fs-toggle-btn" onclick="toggleFullScreen()">
+        📱 전체화면 지도
+      </button>
+      <button class="action-btn primary" onclick="launchNaverNavi()">
+        🧭 네이버 지도 길안내
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // 1. 코스 지점 데이터 정의 (경도 lng, 위도 lat)
+  const courseData = [
+    { name: "서울 시청(출발)", lat: 37.5665, lng: 126.9780, type: "start" },
+    { name: "남양주 물의정원", lat: 37.5647, lng: 127.3276, type: "spot" },
+    { name: "기와집순두부(추천 맛집)", lat: 37.5582, lng: 127.3243, type: "food" },
+    { name: "양평 더그림(도착)", lat: 37.5348, lng: 127.4294, type: "end" }
+  ];
+
+  let mapInstance = null;
+  let activePolyline = null;
+
+  // 2. 렌더링 최우선 기법 (기본 틀과 마커 선제 렌더링)
+  function initMapService() {
+    try {
+      const initialCenter = new naver.maps.LatLng(courseData[0].lat, courseData[0].lng);
+
+      mapInstance = new naver.maps.Map('map', {
+        center: initialCenter,
+        zoom: 11,
+        minZoom: 6,
+        scaleControl: true,
+        logoControl: false,
+        mapDataControl: false,
+        zoomControl: true,
+        zoomControlOptions: { position: naver.maps.Position.RIGHT_CENTER }
+      });
+
+      // 마커 즉시 렌더링 및 경계(Bounds) 계산
+      const mapBounds = new naver.maps.LatLngBounds();
+
+      courseData.forEach((spot, idx) => {
+        const position = new naver.maps.LatLng(spot.lat, spot.lng);
+        mapBounds.extend(position);
+
+        let iconClass = 'marker-pin';
+        let prefix = `${idx + 1}. `;
+        if (spot.type === 'food') {
+          iconClass += ' food';
+          prefix = '🍴 ';
+        } else if (spot.type === 'end') {
+          iconClass += ' end';
+        }
+
+        new naver.maps.Marker({
+          position: position,
+          map: mapInstance,
+          icon: {
+            content: `<div class="${iconClass}">${prefix}${spot.name}</div>`,
+            anchor: new naver.maps.Point(12, 16)
+          }
+        });
+      });
+
+      // 전 지점이 한눈에 들어오도록 뷰포트 맞춤
+      mapInstance.fitBounds(mapBounds, { top: 90, right: 30, bottom: 90, left: 30 });
+
+      // 백그라운드 실제 도로망 비동기 연산
+      fetchOSRMRoute();
+
+    } catch (error) {
+      console.error("네이버 지도 초기화 오류:", error);
+    }
+  }
+
+  // 3. OSRM 글로벌 도로망 연동 (실제 주행 경로 렌더링)
+  async function fetchOSRMRoute() {
+    // OSRM 좌표 형식: 경도,위도;경도,위도...
+    const coordsQuery = courseData.map(pt => `${pt.lng},${pt.lat}`).join(';');
+    const osrmApiUrl = `https://router.project-osrm.org/route/v1/driving/${coordsQuery}?overview=full&geometries=geojson`;
+
+    try {
+      const res = await fetch(osrmApiUrl);
+      if (!res.ok) throw new Error("OSRM API 응답 실패");
+      const data = await res.json();
+
+      if (data.routes && data.routes.length > 0) {
+        const bestRoute = data.routes[0];
+        const rawCoords = bestRoute.geometry.coordinates;
+
+        // GeoJSON [경도, 위도] -> 네이버 지도 좌표 객체 변환
+        const naverPath = rawCoords.map(c => new naver.maps.LatLng(c[1], c[0]));
+
+        if (activePolyline) activePolyline.setMap(null);
+
+        activePolyline = new naver.maps.Polyline({
+          map: mapInstance,
+          path: naverPath,
+          strokeColor: '#03C75A',
+          strokeWeight: 6,
+          strokeOpacity: 0.9,
+          strokeLineJoin: 'round',
+          strokeLineCap: 'round'
+        });
+
+        // 주행 거리 및 소요 시간 계산
+        const distKm = (bestRoute.distance / 1000).toFixed(1);
+        const totalMinutes = Math.round(bestRoute.duration / 60);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        const timeFormatted = hours > 0 ? `${hours}시간 ${minutes}분` : `${minutes}분`;
+
+        document.getElementById('route-dist').innerText = `총 거리: ${distKm}km`;
+        document.getElementById('route-time').innerText = `(예상 소요: 약 ${timeFormatted})`;
+      }
+    } catch (e) {
+      console.warn("OSRM 실제 경로 획득 실패, 직선 폴백 실행:", e);
+      // 백업: 직선 폴리라인 처리
+      const fallbackPoints = courseData.map(pt => new naver.maps.LatLng(pt.lat, pt.lng));
+      activePolyline = new naver.maps.Polyline({
+        map: mapInstance,
+        path: fallbackPoints,
+        strokeColor: '#888888',
+        strokeWeight: 4,
+        strokeStyle: 'shortdash'
+      });
+      document.getElementById('route-dist').innerText = "도로망 데이터 수신 지연";
+    }
+  }
+
+  // 4. 모바일 전체화면 토글
+  function toggleFullScreen() {
+    const doc = window.document;
+    const docElem = doc.documentElement;
+
+    const requestFS = docElem.requestFullscreen || docElem.mozRequestFullScreen || docElem.webkitRequestFullScreen || docElem.msRequestFullscreen;
+    const exitFS = doc.exitFullscreen || doc.mozCancelFullScreen || doc.webkitExitFullscreen || doc.msExitFullscreen;
+
+    if (!doc.fullscreenElement && !doc.webkitFullscreenElement && !doc.mozFullScreenElement && !doc.msFullscreenElement) {
+      if (requestFS) requestFS.call(docElem);
+      document.body.classList.add('is-fullscreen');
+      document.getElementById('fs-toggle-btn').innerText = '✕ 메뉴 복원';
+    } else {
+      if (exitFS) exitFS.call(doc);
+      document.body.classList.remove('is-fullscreen');
+      document.getElementById('fs-toggle-btn').innerText = '📱 전체화면 지도';
+    }
+
+    // 모바일 리사이즈 시 지도 타일 깨짐 방지
+    setTimeout(() => {
+      if (mapInstance) window.dispatchEvent(new Event('resize'));
+    }, 250);
+  }
+
+  // 5. 네이버 지도 앱 길안내 연동 (딥링크)
+  function launchNaverNavi() {
+    const finalDest = courseData[courseData.length - 1];
+    const encodedName = encodeURIComponent(finalDest.name);
+
+    // 네이버 지도 앱 실행 스키마
+    const appSchemeUrl = `nmap://route/car?dlat=${finalDest.lat}&dlng=${finalDest.lng}&dname=${encodedName}&appname=com.travel.course`;
+    // 앱 미설치 시 웹 브라우저 대체 경로
+    const fallbackWebUrl = `https://map.naver.com/v5/directions/-/-/${finalDest.lng},${finalDest.lat},${encodedName}/-/car`;
+
+    const startCheck = Date.now();
+    window.location.href = appSchemeUrl;
+
+    setTimeout(() => {
+      if (Date.now() - startCheck < 2000) {
+        window.open(fallbackWebUrl, '_blank');
+      }
+    }, 1500);
+  }
+
+  window.addEventListener('DOMContentLoaded', initMapService);
+</script>
+
+</body>
+</html>
